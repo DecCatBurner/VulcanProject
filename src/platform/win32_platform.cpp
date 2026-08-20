@@ -1,5 +1,3 @@
-#include <windows.h>
-
 #include "renderer/vk_renderer.cpp"
 
 static bool running = true;
@@ -15,21 +13,21 @@ LRESULT CALLBACK platform_window_callback(HWND window, UINT msg, WPARAM wparam, 
     return DefWindowProcA(window, msg, wparam, lparam);
 }
 
-bool platform_create_window(HWND window) {
+bool platform_create_window(HWND* window) {
     HINSTANCE instance = GetModuleHandleA(0);
 
-    WNDCLASS wc = {};
-    wc.lpfnWndProc = platform_window_callback;
-    wc.hInstance = instance;
-    wc.lpszClassName = "vulkan_engine_class";
-    wc.hCursor = LoadCursor(NULL, IDC_CROSS);
+    WNDCLASS windowClass = {};
+    windowClass.lpfnWndProc = platform_window_callback;
+    windowClass.hInstance = instance;
+    windowClass.lpszClassName = "vulkan_engine_class";
+    windowClass.hCursor = LoadCursor(NULL, IDC_CROSS);
 
-    if(!RegisterClassA(&wc)) {
-        MessageBoxA(window, "Failed registering window class", "Error", MB_ICONEXCLAMATION | MB_OK);
+    if(!RegisterClassA(&windowClass)) {
+        MessageBoxA(0, "Failed registering window class", "Error", MB_ICONEXCLAMATION | MB_OK);
         return false;
     }
 
-    window = CreateWindowExA(
+    *window = CreateWindowExA(
         WS_EX_APPWINDOW, 
         "vulkan_engine_class", 
         "This is a window ;)",
@@ -38,12 +36,15 @@ bool platform_create_window(HWND window) {
         0, 0, instance, 0
     );
 
-    if (window == 0) {
-        MessageBoxA(window, "Failed creating window", "Error", MB_ICONEXCLAMATION | MB_OK);
+    std::cout << "Created HWND = " << *window << std::endl;
+    std::cout << "IsWindow = " << IsWindow(*window) << std::endl;
+
+    if (*window == 0) {
+        MessageBoxA(0, "Failed creating window", "Error", MB_ICONEXCLAMATION | MB_OK);
         return false;
     }
 
-    ShowWindow(window, SW_SHOW);
+    ShowWindow(*window, SW_SHOW);
 
     return true;
 }
@@ -59,13 +60,15 @@ void platform_update_window(HWND window) {
 
 int main() {
     VkContext vkcontext = {};
-    
+
     HWND window = 0;
-    if (!platform_create_window(window)) {
+    std::cout << "Init HWND = " << window << std::endl;
+    std::cout << "IsWindow = " << IsWindow(window) << std::endl;
+    if (!platform_create_window(&window)) {
         return -1;
     }
 
-    if (!Vk_Init(&vkcontext)) {
+    if (!Vk_Init(&vkcontext, window)) {
         return -1;
     }
 
