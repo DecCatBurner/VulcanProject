@@ -1,0 +1,2 @@
+Open integraded terminal in assests/shaders
+    type in "glslc.exe {shaderName.withExtension} -o {shaderName.withExtension.spv}"
