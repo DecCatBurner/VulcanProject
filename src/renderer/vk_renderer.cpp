@@ -10,17 +10,9 @@ std::cout << "ERROR: No defined system." << std::endl;
 #include "structs/dds.h"
 #include "structs/types.h"
 #include "platform.h"
+#include "vk_init.cpp"
 
 #define ARRAY_SIZE(arr) (sizeof((arr))/sizeof((arr)[0]))
-
-#define VK_CHECK(result) do {                              \
-if (result != VK_SUCCESS)                                  \
-{                                                          \
-    std::cout << "VULKAN ERROR: " << result << std::endl;  \
-    __debugbreak();                                        \
-    return false;                                          \
-}                                                          \
-} while (0)
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_callback(
     VkDebugUtilsMessageSeverityFlagBitsEXT msgSeverity,
@@ -47,13 +39,21 @@ struct VkContext {
     VkQueue graphicsQueue;
     VkSwapchainKHR swapchain;
     VkRenderPass renderPass;
+
+    VkCommandPool commandPool;
+    VkDescriptorPool descriptorPool;
+
+    VkSampler sampler;
     VkPipelineLayout pipelineLayout;
     VkPipeline pipeline;
-    VkCommandPool commandPool;
+    VkDescriptorSetLayout setLayout;
+    VkDescriptorSet descriptorSet;
 
     VkSemaphore aquireSemaphore;
     VkSemaphore submitSemaphore;
+    VkFence imageAvaliableFence;
 
+    Buffer stagingBuffer;
     LoadedImage image;
 
     uint32_t swapchainImageCount;
@@ -352,6 +352,7 @@ bool Vk_Init(VkContext* vkcontext, void* window) {
      */
     {
     std::cout << "Creating the Command Pool..." << '\n';
+
     VkCommandPoolCreateInfo commandPoolInfo = {};
     commandPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 
@@ -359,24 +360,51 @@ bool Vk_Init(VkContext* vkcontext, void* window) {
     }
 
     /*
-     * Create the VK Semaphores
+     * Create the Semaphores and Fences
      */
     {
     std::cout << "Initializing Semaphores..." << '\n';
+
     VkSemaphoreCreateInfo semaphoreInfo = {};
     semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     VK_CHECK(vkCreateSemaphore(vkcontext->device, &semaphoreInfo, 0, &vkcontext->aquireSemaphore));
     VK_CHECK(vkCreateSemaphore(vkcontext->device, &semaphoreInfo, 0, &vkcontext->submitSemaphore));
+
+    VkFenceCreateInfo fenceInfo = fence_info(VK_FENCE_CREATE_SIGNALED_BIT);
+    VK_CHECK(vkCreateFence(vkcontext->device, &fenceInfo, 0, &vkcontext->imageAvaliableFence));
     }
 
-    /* 
-     * Pipeline Layout 
+    /*
+     * Create the Descriptor Set Layouts
      */
     {
-    std::cout << "Creating the Pipeline Layout..." << '\n';
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    VK_CHECK(vkCreatePipelineLayout(vkcontext->device, &pipelineLayoutInfo, 0, &vkcontext->pipelineLayout));
+        std::cout << "Creating the Descriptor Set Layout..." << '\n';
+
+        VkDescriptorSetLayoutBinding bindingSprite = {};
+        bindingSprite.binding = 0;
+        bindingSprite.descriptorCount = 1; // Array size of the data
+        bindingSprite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindingSprite.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // Stage of pipeline accessed
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 1; // What's used in the shader (binding = X)
+        layoutInfo.pBindings = &bindingSprite;
+
+        VK_CHECK(vkCreateDescriptorSetLayout(vkcontext->device, &layoutInfo, 0, &vkcontext->setLayout));
+    }
+
+    /*
+     * Create the Pipeline Layout
+     */
+    {
+        std::cout << "Creating the Pipeline Layout..." << '\n';
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 1;
+        pipelineLayoutInfo.pSetLayouts = &vkcontext->setLayout;
+        VK_CHECK(vkCreatePipelineLayout(vkcontext->device, &pipelineLayoutInfo, 0, &vkcontext->pipelineLayout));
     }
 
     /*
@@ -411,7 +439,7 @@ bool Vk_Init(VkContext* vkcontext, void* window) {
     VkRect2D scissor = {};
     VkViewport viewport = {};
 
-    VkPipelineViewportStateCreateInfo viewportState;
+    VkPipelineViewportStateCreateInfo viewportState = {};
     viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
     viewportState.pScissors = &scissor;
     viewportState.scissorCount = 1;
@@ -419,15 +447,15 @@ bool Vk_Init(VkContext* vkcontext, void* window) {
     viewportState.viewportCount = 1;
 
     /* Multisample State */ std::cout << "\tMultisample" << '\n';
-    VkPipelineMultisampleStateCreateInfo multisampleState;
+    VkPipelineMultisampleStateCreateInfo multisampleState = {};
     multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     /* Input Assembly */ std::cout << "\tAssembly" << '\n';
-    VkPipelineInputAssemblyStateCreateInfo inputAssemblyState;
+    VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = {};
     inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    // inputAssemblyState.primitiveRestartEnable = VK_FALSE;
+    inputAssemblyState.primitiveRestartEnable = VK_FALSE;
 
     /* Shader Modules */ std::cout << "\tShader" << '\n';
     VkShaderModule vertexShader, fragmentShader;
@@ -442,13 +470,13 @@ bool Vk_Init(VkContext* vkcontext, void* window) {
     shaderInfo.pCode = (uint32_t*)code;
     shaderInfo.codeSize = sizeInBytes;
     VK_CHECK(vkCreateShaderModule(vkcontext->device, &shaderInfo, 0, &vertexShader));
-    delete code;
+    delete[] code;
 
     code = platform_read_file("assets/shaders/shader.frag.spv", &sizeInBytes);
     shaderInfo.pCode = (uint32_t*)code;
     shaderInfo.codeSize = sizeInBytes;
     VK_CHECK(vkCreateShaderModule(vkcontext->device, &shaderInfo, 0, &fragmentShader));
-    delete code;
+    delete[] code;
 
     VkPipelineShaderStageCreateInfo vertexShaderInfo = {};
     vertexShaderInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -501,13 +529,54 @@ bool Vk_Init(VkContext* vkcontext, void* window) {
     }
 
     /*
+     * Create Staging Buffer
+     */
+    {
+        std::cout << "Creating the Staging Buffer..." << '\n';
+
+        VkBufferCreateInfo bufferInfo = {};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bufferInfo.size = MB(1);
+
+        VK_CHECK(vkCreateBuffer(vkcontext->device, &bufferInfo, 0, &vkcontext->stagingBuffer.buffer));
+
+        VkMemoryRequirements memoryReqs;
+        vkGetBufferMemoryRequirements(vkcontext->device, vkcontext->stagingBuffer.buffer, &memoryReqs);
+
+        VkPhysicalDeviceMemoryProperties gpuMemoryProps;
+        vkGetPhysicalDeviceMemoryProperties(vkcontext->gpu, &gpuMemoryProps);
+
+        VkMemoryAllocateInfo allocateInfo = {};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = bufferInfo.size;
+
+        for (uint32_t i = 0; i < gpuMemoryProps.memoryTypeCount; i++) {
+            if (memoryReqs.memoryTypeBits & (1 << i) &&
+                (gpuMemoryProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) 
+                 == (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                allocateInfo.memoryTypeIndex = i;
+                break;
+            }
+        }
+
+        VK_CHECK(vkAllocateMemory(vkcontext->device, &allocateInfo, 0, &vkcontext->stagingBuffer.memory));
+
+        VK_CHECK(vkMapMemory(vkcontext->device, vkcontext->stagingBuffer.memory, 0, bufferInfo.size, 0, &vkcontext->stagingBuffer.data));
+        VK_CHECK(vkBindBufferMemory(vkcontext->device, vkcontext->stagingBuffer.buffer, vkcontext->stagingBuffer.memory, 0));
+    }
+
+    /*
      * Create Image
      */
     {
         std::cout << "Image" << '\n';
 
         uint64_t filesize = 0;
-        DDSFile* textureFile = (DDSFile*)platform_read_file("assets/textures/RedBerry.dds", &filesize);
+        DDSFile* textureFile = (DDSFile*)platform_read_file("assets/textures/HeartBreak.DDS", &filesize);
+        uint64_t textureSize = textureFile->header.width * textureFile->header.height * 4;
+
+        memcpy(vkcontext->stagingBuffer.data, &textureFile->dataBegin, textureSize);
 
         //TODO: Assertions
 
@@ -532,7 +601,7 @@ bool Vk_Init(VkContext* vkcontext, void* window) {
 
         VkMemoryAllocateInfo allocateInfo = {};
         allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = textureFile->header.width * textureFile->header.height * 4;
+        allocateInfo.allocationSize = textureSize;
 
         for (uint32_t i = 0; i < gpuMemoryProps.memoryTypeCount; i++) {
             if (memoryReqs.memoryTypeBits & (1 << i) &&
@@ -544,6 +613,159 @@ bool Vk_Init(VkContext* vkcontext, void* window) {
 
         VK_CHECK(vkAllocateMemory(vkcontext->device, &allocateInfo, 0, &vkcontext->image.memory));
         VK_CHECK(vkBindImageMemory(vkcontext->device, vkcontext->image.image, vkcontext->image.memory, 0));
+
+        /*
+         * Run Cmd Buffer
+         */
+        VkCommandBuffer commandBuffer;
+        VkCommandBufferAllocateInfo allocateCmdInfo = cmd_allocate_buffer_info(vkcontext->commandPool);
+        VK_CHECK(vkAllocateCommandBuffers(vkcontext->device, &allocateCmdInfo, &commandBuffer));
+
+        VkCommandBufferBeginInfo beginInfo = {};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+
+        /*
+         * Transition Image Layout
+         */
+        VkImageSubresourceRange range = {};
+        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        range.layerCount = 1;
+        range.levelCount = 1;
+
+        VkImageMemoryBarrier imageMemoryBarrier= {};
+        imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        imageMemoryBarrier.image = vkcontext->image.image;
+        imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        imageMemoryBarrier.subresourceRange = range;
+
+        vkCmdPipelineBarrier(commandBuffer, 
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 
+            0, 
+            0, 0, 
+            0, 0, 
+            1, &imageMemoryBarrier);
+
+        VkBufferImageCopy copyRegion = {};
+        copyRegion.imageExtent = {textureFile->header.width, textureFile->header.height, 1};
+        copyRegion.imageSubresource.layerCount = 1;
+        copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vkCmdCopyBufferToImage(commandBuffer, vkcontext->stagingBuffer.buffer, vkcontext->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+        imageMemoryBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        imageMemoryBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 
+            0, 
+            0, 0, 
+            0, 0, 
+            1, &imageMemoryBarrier);
+
+        VK_CHECK(vkEndCommandBuffer(commandBuffer));
+
+        VkFence uploadFence;
+        VkFenceCreateInfo fenceInfo = fence_info();
+        VK_CHECK(vkCreateFence(vkcontext->device, &fenceInfo, 0, &uploadFence));
+
+        VkSubmitInfo submitInfo = submit_info(&commandBuffer);
+        VK_CHECK(vkQueueSubmit(vkcontext->graphicsQueue, 1, &submitInfo, uploadFence));
+
+        VK_CHECK(vkWaitForFences(vkcontext->device, 1, &uploadFence, VK_TRUE, UINT64_MAX));
+    }
+
+    /*
+     * Create Image View
+     */
+    {
+        std::cout << "Image View..." << '\n';
+
+        VkImageViewCreateInfo viewInfo = {};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = vkcontext->image.image;
+        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.layerCount = 1;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+
+        vkCreateImageView(vkcontext->device, &viewInfo, 0, &vkcontext->image.view);
+    }
+
+    /*
+     * Create Sampler
+     */
+    {
+        std::cout << "Creating the Sampler..." << '\n';
+
+        VkSamplerCreateInfo samplerInfo = {};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.minFilter = VK_FILTER_NEAREST;
+        samplerInfo.magFilter = VK_FILTER_NEAREST;
+
+        vkCreateSampler(vkcontext->device, &samplerInfo, 0, &vkcontext->sampler);
+    }
+
+    /*
+     * Create Descriptor Pool
+     */
+    {
+        std::cout << "Creating the Descriptor Pool..." << '\n';
+
+        VkDescriptorPoolSize poolSize = {};
+        poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSize.descriptorCount = 1;
+
+        VkDescriptorPoolCreateInfo descriptorPoolInfo = {};
+        descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        descriptorPoolInfo.maxSets = 1;
+        descriptorPoolInfo.poolSizeCount = 1;
+        descriptorPoolInfo.pPoolSizes = &poolSize;
+        VK_CHECK(vkCreateDescriptorPool(vkcontext->device, &descriptorPoolInfo, 0, &vkcontext->descriptorPool));
+    }
+
+    /*
+     * Create Descriptor Set
+     */
+    {
+        std::cout << "Creating the Descriptor Set..." << '\n';
+
+        VkDescriptorSetAllocateInfo setInfo = {};
+        setInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        setInfo.pSetLayouts = &vkcontext->setLayout;
+        setInfo.descriptorSetCount = 1;
+        setInfo.descriptorPool = vkcontext->descriptorPool;
+        VK_CHECK(vkAllocateDescriptorSets(vkcontext->device, &setInfo, &vkcontext->descriptorSet));
+    }
+
+    /*
+     * Update the Descriptor Set
+     */
+    {
+        std::cout << "Updating the Descriptor Set..." << '\n';
+
+        VkDescriptorImageInfo imageInfo = {};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = vkcontext->image.view;
+        imageInfo.sampler = vkcontext->sampler;
+
+        VkWriteDescriptorSet write = {};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = vkcontext->descriptorSet;
+        write.pImageInfo = &imageInfo;
+        write.dstBinding = 0; // TODO: Link to descriptor set layout info
+        write.descriptorCount = 1; // TODO: Link to descriprot set layout info (length of data array)
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+        vkUpdateDescriptorSets(vkcontext->device, 1, &write, 0, 0);
     }
 
     std::cout << "Initialized Vulkan" << std::endl;
@@ -559,10 +781,7 @@ bool vk_render(VkContext* vkcontext) {
      * Create Command Buffer
      */
     VkCommandBuffer commandBuffer;
-    VkCommandBufferAllocateInfo allocateInfo = {};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocateInfo.commandBufferCount = 1;
-    allocateInfo.commandPool = vkcontext->commandPool;
+    VkCommandBufferAllocateInfo allocateInfo = cmd_allocate_buffer_info(vkcontext->commandPool);
     VK_CHECK(vkAllocateCommandBuffers(vkcontext->device, &allocateInfo, &commandBuffer));
 
     VkCommandBufferBeginInfo beginInfo = {};
@@ -598,8 +817,11 @@ bool vk_render(VkContext* vkcontext) {
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
         vkCmdSetViewport(commandBuffer, 0 ,1, &viewport);
 
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vkcontext->pipelineLayout,
+                                0, 1, &vkcontext->descriptorSet, 0, 0);
+
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vkcontext->pipeline);
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        vkCmdDraw(commandBuffer, 6, 1, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
     }
@@ -608,11 +830,8 @@ bool vk_render(VkContext* vkcontext) {
     
     VkPipelineStageFlags waitStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
-    VkSubmitInfo submitInfo = {};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    VkSubmitInfo submitInfo = submit_info(&commandBuffer);
     submitInfo.pWaitDstStageMask = &waitStageMask;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = &vkcontext->submitSemaphore;
     submitInfo.waitSemaphoreCount = 1;

@@ -41,7 +41,7 @@ bool platform_create_window() {
         "vulkan_engine_class", 
         "This is a window ;)",
         WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_OVERLAPPED, 
-        100, 100, 1500, 720, 
+        00, 00, 1400, 720, 
         0, 0, instance, 0
     );
 
